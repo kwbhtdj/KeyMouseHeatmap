@@ -22,7 +22,7 @@ internal static class Program
 
 internal sealed class MainForm : Form
 {
-    private const string AppVersion = "v1.6.1";
+    private const string AppVersion = "v1.6.2";
     private readonly string appDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KeyMouseHeatmap", "data");
     private readonly JsonSerializerOptions jsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
     private readonly string selfProcessName = Process.GetCurrentProcess().ProcessName;
@@ -540,27 +540,24 @@ internal sealed class MainForm : Form
             if (physicalDownKeys.Remove(name) | physicalDownLastSeen.Remove(name))
                 pressedDirty = true;
         };
-        InputHooks.MousePressed += button =>
+        RawMouseInput.MousePressed += button =>
         {
             if (IsKeyboardOnlyMode()) return;
             if (IsDisposed) return;
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => InputHooks_MousePressed(button)));
-                return;
-            }
             InputHooks_MousePressed(button);
         };
-        InputHooks.MouseReleased += button =>
+        RawMouseInput.MouseReleased += button =>
         {
             if (IsDisposed) return;
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => InputHooks_MouseReleased(button)));
-                return;
-            }
             InputHooks_MouseReleased(button);
         };
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (isTracking && RawMouseInput.ProcessMessage(m))
+            return;
+        base.WndProc(ref m);
     }
 
     private void InputHooks_MousePressed(string button)
@@ -829,6 +826,7 @@ internal sealed class MainForm : Form
         ChangeDate(DateOnly.FromDateTime(DateTime.Today));
         lastMousePoint = null;
         InputHooks.Start();
+        RawMouseInput.Register(Handle);
         mouseDistanceTimer.Start();
         isTracking = true;
         RefreshAll();
@@ -837,6 +835,7 @@ internal sealed class MainForm : Form
     private void StopTracking()
     {
         InputHooks.Stop();
+        RawMouseInput.Unregister();
         mouseDistanceTimer.Stop();
         lastMousePoint = null;
         isTracking = false;
@@ -2794,34 +2793,19 @@ internal static class InputHooks
 {
     public static event Action<string>? KeyPressed;
     public static event Action<string>? KeyReleased;
-    public static event Action<string>? MousePressed;
-    public static event Action<string>? MouseReleased;
     private const int WhKeyboardLl = 13;
-    private const int WhMouseLl = 14;
     private const int WmKeydown = 0x0100;
     private const int WmKeyup = 0x0101;
     private const int WmSyskeydown = 0x0104;
     private const int WmSyskeyup = 0x0105;
-    private const int WmLbuttondown = 0x0201;
-    private const int WmLbuttonup = 0x0202;
-    private const int WmRbuttondown = 0x0204;
-    private const int WmRbuttonup = 0x0205;
-    private const int WmMbuttondown = 0x0207;
-    private const int WmMbuttonup = 0x0208;
-    private const int WmMousewheel = 0x020A;
-    private const int WmXbuttondown = 0x020B;
-    private const int WmXbuttonup = 0x020C;
 
     private static readonly LowLevelKeyboardProc KeyboardProc = KeyboardHookCallback;
-    private static readonly LowLevelMouseProc MouseProc = MouseHookCallback;
     private static IntPtr keyboardHook = IntPtr.Zero;
-    private static IntPtr mouseHook = IntPtr.Zero;
     private static readonly HashSet<string> HookDownKeys = new(StringComparer.OrdinalIgnoreCase);
 
     public static void Start()
     {
         if (keyboardHook == IntPtr.Zero) keyboardHook = SetHook(KeyboardProc, WhKeyboardLl);
-        if (mouseHook == IntPtr.Zero) mouseHook = SetHook(MouseProc, WhMouseLl);
     }
 
     public static void Stop()
@@ -2830,11 +2814,6 @@ internal static class InputHooks
         {
             UnhookWindowsHookEx(keyboardHook);
             keyboardHook = IntPtr.Zero;
-        }
-        if (mouseHook != IntPtr.Zero)
-        {
-            UnhookWindowsHookEx(mouseHook);
-            mouseHook = IntPtr.Zero;
         }
         HookDownKeys.Clear();
     }
@@ -2866,71 +2845,13 @@ internal static class InputHooks
         return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
     }
 
-    private static IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0)
-        {
-            var message = (int)wParam;
-            var name = message switch
-            {
-                WmLbuttondown or WmLbuttonup => "Left Button",
-                WmRbuttondown or WmRbuttonup => "Right Button",
-                WmMbuttondown or WmMbuttonup => "Middle Button",
-                WmMousewheel => WheelName(lParam),
-                WmXbuttondown or WmXbuttonup => XButtonName(lParam),
-                _ => null
-            };
-
-            if (name != null)
-            {
-                if (message == WmLbuttonup || message == WmRbuttonup || message == WmMbuttonup || message == WmXbuttonup)
-                    MouseReleased?.Invoke(name);
-                else
-                    MousePressed?.Invoke(name);
-            }
-        }
-        return CallNextHookEx(mouseHook, nCode, wParam, lParam);
-    }
-
-    private static string XButtonName(IntPtr lParam)
-    {
-        var info = Marshal.PtrToStructure<MouseHookStruct>(lParam);
-        var xButton = (info.MouseData >> 16) & 0xffff;
-        return xButton == 1 ? "Back Button" : "Forward Button";
-    }
-
-    private static string WheelName(IntPtr lParam)
-    {
-        var info = Marshal.PtrToStructure<MouseHookStruct>(lParam);
-        var delta = unchecked((short)((info.MouseData >> 16) & 0xffff));
-        return delta > 0 ? "Wheel Up" : "Wheel Down";
-    }
-
     private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint
-    {
-        public int X;
-        public int Y;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct KeyboardHookStruct
     {
         public int VkCode;
         public int ScanCode;
-        public int Flags;
-        public int Time;
-        public IntPtr ExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MouseHookStruct
-    {
-        public NativePoint Point;
-        public int MouseData;
         public int Flags;
         public int Time;
         public IntPtr ExtraInfo;
@@ -2948,4 +2869,130 @@ internal static class InputHooks
 
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
+}
+
+internal static class RawMouseInput
+{
+    public static event Action<string>? MousePressed;
+    public static event Action<string>? MouseReleased;
+
+    private const int WmInput = 0x00FF;
+    private const int RidInput = 0x10000003;
+    private const int RIMTypeMouse = 0;
+    private const int RidevInputSink = 0x00000100;
+    private const int RidevRemove = 0x00000001;
+
+    private const ushort LeftDown = 0x0001;
+    private const ushort LeftUp = 0x0002;
+    private const ushort RightDown = 0x0004;
+    private const ushort RightUp = 0x0008;
+    private const ushort MiddleDown = 0x0010;
+    private const ushort MiddleUp = 0x0020;
+    private const ushort XDown = 0x0080;
+    private const ushort XUp = 0x0100;
+    private const ushort Wheel = 0x0400;
+
+    public static void Register(IntPtr hwnd)
+    {
+        var device = new RawInputDevice
+        {
+            UsagePage = 0x01,
+            Usage = 0x02,
+            Flags = RidevInputSink,
+            Target = hwnd
+        };
+        RegisterRawInputDevices([device], 1, Marshal.SizeOf<RawInputDevice>());
+    }
+
+    public static void Unregister()
+    {
+        var device = new RawInputDevice
+        {
+            UsagePage = 0x01,
+            Usage = 0x02,
+            Flags = RidevRemove,
+            Target = IntPtr.Zero
+        };
+        RegisterRawInputDevices([device], 1, Marshal.SizeOf<RawInputDevice>());
+    }
+
+    public static bool ProcessMessage(Message message)
+    {
+        if (message.Msg != WmInput) return false;
+
+        var size = 0u;
+        _ = GetRawInputData(message.LParam, RidInput, IntPtr.Zero, ref size, (uint)Marshal.SizeOf<RawInputHeader>());
+        if (size == 0) return true;
+
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            if (GetRawInputData(message.LParam, RidInput, buffer, ref size, (uint)Marshal.SizeOf<RawInputHeader>()) != size)
+                return true;
+
+            var input = Marshal.PtrToStructure<RawInput>(buffer);
+            if (input.Header.Type != RIMTypeMouse) return true;
+
+            var flags = (ushort)(input.Mouse.Buttons & 0xffff);
+            var data = unchecked((short)((input.Mouse.Buttons >> 16) & 0xffff));
+
+            if ((flags & LeftDown) != 0) MousePressed?.Invoke("Left Button");
+            if ((flags & LeftUp) != 0) MouseReleased?.Invoke("Left Button");
+            if ((flags & RightDown) != 0) MousePressed?.Invoke("Right Button");
+            if ((flags & RightUp) != 0) MouseReleased?.Invoke("Right Button");
+            if ((flags & MiddleDown) != 0) MousePressed?.Invoke("Middle Button");
+            if ((flags & MiddleUp) != 0) MouseReleased?.Invoke("Middle Button");
+            if ((flags & XDown) != 0) MousePressed?.Invoke(data == 1 ? "Back Button" : "Forward Button");
+            if ((flags & XUp) != 0) MouseReleased?.Invoke(data == 1 ? "Back Button" : "Forward Button");
+            if ((flags & Wheel) != 0) MousePressed?.Invoke(data > 0 ? "Wheel Up" : "Wheel Down");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+
+        return true;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RawInputDevice
+    {
+        public ushort UsagePage;
+        public ushort Usage;
+        public int Flags;
+        public IntPtr Target;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RawInputHeader
+    {
+        public int Type;
+        public int Size;
+        public IntPtr Device;
+        public IntPtr WParam;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RawMouse
+    {
+        public ushort Flags;
+        public uint Buttons;
+        public uint RawButtons;
+        public int LastX;
+        public int LastY;
+        public uint ExtraInformation;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RawInput
+    {
+        public RawInputHeader Header;
+        public RawMouse Mouse;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterRawInputDevices(RawInputDevice[] devices, uint numDevices, int size);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetRawInputData(IntPtr rawInput, uint command, IntPtr data, ref uint size, uint sizeHeader);
 }
