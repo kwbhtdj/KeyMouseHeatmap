@@ -22,7 +22,7 @@ internal static class Program
 
 internal sealed class MainForm : Form
 {
-    private const string AppVersion = "v1.6.0";
+    private const string AppVersion = "v1.6.1";
     private readonly string appDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KeyMouseHeatmap", "data");
     private readonly JsonSerializerOptions jsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
     private readonly string selfProcessName = Process.GetCurrentProcess().ProcessName;
@@ -85,6 +85,7 @@ internal sealed class MainForm : Form
     private bool rankDirty = true;
     private bool appDetailDirty = true;
     private Point? lastMousePoint;
+    private long lastDistanceUiTick;
     private int rankTotalCount = 1;
     private int appTotalCount = 1;
     private List<RankRow> rankRows = new();
@@ -155,16 +156,18 @@ internal sealed class MainForm : Form
             // 3) 长按重复 KeyDown 不触发 UI 重绘。
             if (CleanupStalePhysicalDownKeys()) pressedDirty = true;
 
+            var uiActive = IsUiActive();
+
             if (pressedDirty)
             {
                 pressedDirty = false;
                 if (overlayButton.Checked) overlay.SetPressedKeys(GetLivePressedKeys().Concat(GetLivePressedMouse()).ToArray());
-                InvalidateActiveView();
+                if (uiActive) InvalidateActiveView();
             }
 
             if (!liveDirty) return;
             liveDirty = false;
-            RefreshLive();
+            if (uiActive || overlayButton.Checked) RefreshLive();
         };
         liveRefreshTimer.Start();
 
@@ -613,7 +616,12 @@ internal sealed class MainForm : Form
             {
                 EnsureTodayForInput();
                 state.MouseDistancePixels += distance;
-                liveDirty = true;
+                var nowTick = Environment.TickCount64;
+                if ((IsUiActive() || overlayButton.Checked) && nowTick - lastDistanceUiTick >= 250)
+                {
+                    lastDistanceUiTick = nowTick;
+                    liveDirty = true;
+                }
             }
         }
         lastMousePoint = point;
@@ -692,7 +700,7 @@ internal sealed class MainForm : Form
         if (tabs.SelectedTab?.Name == "appDetailTab") appDetailDirty = true;
         liveDirty = true;
         // 排行页由 100ms 定时器批量刷新，避免多键同时按下时连续重建/重排。
-        if (tabs.SelectedTab?.Text == "分组") RefreshGroupStats();
+        if (IsUiActive() && tabs.SelectedTab?.Text == "分组") RefreshGroupStats();
     }
 
     private string[] GetLivePressedKeys()
@@ -879,15 +887,20 @@ internal sealed class MainForm : Form
     private void RefreshLive()
     {
         if (isResizing) return;
-        startButton.Text = isTracking ? "暂停" : "开始";
-        nextButton.Enabled = selectedDate < DateOnly.FromDateTime(DateTime.Today);
-        stateLabel.Text = $"{AppVersion} | 状态: {(isTracking ? "记录中" : "已暂停")} | 日期: {selectedDate:yyyy-MM-dd}";
-        totalLabel.Text = $"今日 键盘 {keyTotalCache} 次 | 鼠标 {mouseTotalCache} 次 | 显示范围 {rangeBox.SelectedItem ?? "今天"}";
-        totalLabel.Text += $" | \u9f20\u6807\u79fb\u52a8 {FormatDistance(state.MouseDistancePixels)}";
-        pathLabel.Text = CurrentDataFile;
-        InvalidateActiveView();
+        if (IsUiActive())
+        {
+            startButton.Text = isTracking ? "暂停" : "开始";
+            nextButton.Enabled = selectedDate < DateOnly.FromDateTime(DateTime.Today);
+            stateLabel.Text = $"{AppVersion} | 状态: {(isTracking ? "记录中" : "已暂停")} | 日期: {selectedDate:yyyy-MM-dd}";
+            totalLabel.Text = $"今日 键盘 {keyTotalCache} 次 | 鼠标 {mouseTotalCache} 次 | 显示范围 {rangeBox.SelectedItem ?? "今天"}";
+            totalLabel.Text += $" | \u9f20\u6807\u79fb\u52a8 {FormatDistance(state.MouseDistancePixels)}";
+            pathLabel.Text = CurrentDataFile;
+            InvalidateActiveView();
+        }
         if (overlayButton.Checked) overlay.UpdateSpeed(BuildSpeedStats(state));
     }
+
+    private bool IsUiActive() => Visible && WindowState != FormWindowState.Minimized && !IsDisposed;
 
     private void InvalidateActiveView()
     {
@@ -2803,6 +2816,7 @@ internal static class InputHooks
     private static readonly LowLevelMouseProc MouseProc = MouseHookCallback;
     private static IntPtr keyboardHook = IntPtr.Zero;
     private static IntPtr mouseHook = IntPtr.Zero;
+    private static readonly HashSet<string> HookDownKeys = new(StringComparer.OrdinalIgnoreCase);
 
     public static void Start()
     {
@@ -2822,6 +2836,7 @@ internal static class InputHooks
             UnhookWindowsHookEx(mouseHook);
             mouseHook = IntPtr.Zero;
         }
+        HookDownKeys.Clear();
     }
 
     private static IntPtr SetHook(Delegate proc, int hookId)
@@ -2838,8 +2853,15 @@ internal static class InputHooks
             var message = (int)wParam;
             var info = Marshal.PtrToStructure<KeyboardHookStruct>(lParam);
             var name = KeyNames.NameFromKeyboardHook(info.VkCode, info.ScanCode, info.Flags);
-            if (message == WmKeydown || message == WmSyskeydown) KeyPressed?.Invoke(name);
-            else if (message == WmKeyup || message == WmSyskeyup) KeyReleased?.Invoke(name);
+            if (message == WmKeydown || message == WmSyskeydown)
+            {
+                if (HookDownKeys.Add(name)) KeyPressed?.Invoke(name);
+            }
+            else if (message == WmKeyup || message == WmSyskeyup)
+            {
+                HookDownKeys.Remove(name);
+                KeyReleased?.Invoke(name);
+            }
         }
         return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
     }
