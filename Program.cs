@@ -22,14 +22,18 @@ internal static class Program
 
 internal sealed class MainForm : Form
 {
-    private readonly string appDir = Path.Combine(AppContext.BaseDirectory, "data");
+    private const string AppVersion = "v1.6.0";
+    private readonly string appDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KeyMouseHeatmap", "data");
     private readonly JsonSerializerOptions jsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
+    private readonly string selfProcessName = Process.GetCurrentProcess().ProcessName;
     private readonly CombinedView combinedView = new();
     private readonly KeyboardView keyboardView = new();
     private readonly MouseView mouseView = new();
     private readonly PeakView peakView = new();
     private readonly SpeedView speedView = new();
     private readonly ListView rankList = new();
+    private readonly ListView appDetailList = new();
+    private readonly ImageList appIconList = new() { ImageSize = new Size(20, 20), ColorDepth = ColorDepth.Depth32Bit };
     private readonly TabControl tabs = new();
     private readonly StatusStrip statusStrip = new();
     private readonly ToolStripStatusLabel stateLabel = new();
@@ -65,6 +69,7 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon trayIcon = new();
     private readonly System.Windows.Forms.Timer refreshTimer = new();
     private readonly System.Windows.Forms.Timer liveRefreshTimer = new();
+    private readonly System.Windows.Forms.Timer mouseDistanceTimer = new();
     private readonly System.Windows.Forms.Timer resizeTimer = new();
     private readonly System.Windows.Forms.Timer saveTimer = new();
     private UsageState state;
@@ -78,7 +83,12 @@ internal sealed class MainForm : Form
     private int keyTotalCache;
     private int mouseTotalCache;
     private bool rankDirty = true;
+    private bool appDetailDirty = true;
+    private Point? lastMousePoint;
+    private int rankTotalCount = 1;
+    private int appTotalCount = 1;
     private List<RankRow> rankRows = new();
+    private List<AppKeyRow> appKeyRows = new();
 
     private bool ViewingToday => selectedDate == DateOnly.FromDateTime(DateTime.Today);
     private string CurrentDataFile => DataFile(selectedDate);
@@ -86,6 +96,7 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Directory.CreateDirectory(appDir);
+        MigrateVersionData();
         settings = LoadSettings();
         MigrateOldData();
         state = LoadState(selectedDate);
@@ -127,11 +138,15 @@ internal sealed class MainForm : Form
         themeBox.SelectedItem = string.IsNullOrWhiteSpace(settings.Theme) ? "浅色" : settings.Theme;
         ApplyTheme(themeBox.SelectedItem?.ToString() ?? "浅色");
 
-        refreshTimer.Interval = 100;
-        refreshTimer.Tick += (_, _) => RefreshRankList();
+        refreshTimer.Interval = 250;
+        refreshTimer.Tick += (_, _) =>
+        {
+            RefreshRankList();
+            RefreshAppDetailList();
+        };
         refreshTimer.Start();
 
-        liveRefreshTimer.Interval = 8;
+        liveRefreshTimer.Interval = 33;
         liveRefreshTimer.Tick += (_, _) =>
         {
             // 按键高亮和统计刷新分离：
@@ -144,9 +159,7 @@ internal sealed class MainForm : Form
             {
                 pressedDirty = false;
                 if (overlayButton.Checked) overlay.SetPressedKeys(GetLivePressedKeys().Concat(GetLivePressedMouse()).ToArray());
-                if (combinedView.Visible) combinedView.Invalidate();
-                if (keyboardView.Visible) keyboardView.Invalidate();
-                if (mouseView.Visible) mouseView.Invalidate();
+                InvalidateActiveView();
             }
 
             if (!liveDirty) return;
@@ -154,6 +167,9 @@ internal sealed class MainForm : Form
             RefreshLive();
         };
         liveRefreshTimer.Start();
+
+        mouseDistanceTimer.Interval = 100;
+        mouseDistanceTimer.Tick += (_, _) => PollMouseDistance();
 
         resizeTimer.Interval = 140;
         resizeTimer.Tick += (_, _) =>
@@ -200,7 +216,8 @@ internal sealed class MainForm : Form
             Padding = new Padding(8, 4, 8, 4),
             ImageScalingSize = new Size(18, 18),
             BackColor = Color.White,
-            RenderMode = ToolStripRenderMode.System,
+            RenderMode = ToolStripRenderMode.ManagerRenderMode,
+            Renderer = new StrongToolStripRenderer(),
             CanOverflow = false,
             AutoSize = true,
             Stretch = true
@@ -319,11 +336,13 @@ internal sealed class MainForm : Form
         rankList.FullRowSelect = true;
         rankList.GridLines = true;
         rankList.VirtualMode = true;
+        rankList.OwnerDraw = true;
         rankList.HideSelection = false;
         rankList.Columns.Add("排行", 70, HorizontalAlignment.Right);
         rankList.Columns.Add("设备", 90);
         rankList.Columns.Add("按键", 170);
         rankList.Columns.Add("次数", 100, HorizontalAlignment.Right);
+        rankList.Columns.Add("\u7edf\u8ba1\u6761", 260);
         rankList.RetrieveVirtualItem += (_, e) =>
         {
             if (e.ItemIndex < 0 || e.ItemIndex >= rankRows.Count)
@@ -336,18 +355,76 @@ internal sealed class MainForm : Form
             item.SubItems.Add(row.Device);
             item.SubItems.Add(row.Name);
             item.SubItems.Add(row.Count.ToString());
+            item.SubItems.Add("");
             e.Item = item;
+        };
+        rankList.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        rankList.DrawSubItem += (_, e) =>
+        {
+            if (e.ItemIndex < 0 || e.ItemIndex >= rankRows.Count) { e.DrawDefault = true; return; }
+            if (e.ColumnIndex == 4) DrawStatBar(e.Graphics, e.Bounds, rankRows[e.ItemIndex].Count, rankTotalCount);
+            else e.DrawDefault = true;
         };
         rankTab.Controls.Add(rankList);
 
         var groupTab = new TabPage("分组") { BackColor = Color.FromArgb(247, 248, 250), Padding = new Padding(10), ImageKey = "group" };
-        var groupList = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true, Name = "groupList" };
+        var groupList = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true, OwnerDraw = true, Name = "groupList" };
         groupList.Columns.Add("分组", 160);
         groupList.Columns.Add("次数", 120, HorizontalAlignment.Right);
+        groupList.Columns.Add("\u7edf\u8ba1\u6761", 260);
         groupList.Columns.Add("说明", 520);
+        groupList.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        groupList.DrawSubItem += (_, e) =>
+        {
+            if (e.ColumnIndex == 2 && e.Item?.Tag is GroupBarTag tag)
+                DrawStatBar(e.Graphics, e.Bounds, tag.Count, tag.Total);
+            else
+                e.DrawDefault = true;
+        };
         groupTab.Controls.Add(groupList);
 
-        tabs.TabPages.AddRange([overviewTab, keyboardTab, mouseTab, peakTab, speedTab, rankTab, groupTab]);
+        tabs.ImageList.Images.Add("app", IconBitmap("A", Color.FromArgb(48, 75, 110)));
+        var appTab = new TabPage("\u5e94\u7528\u8be6\u60c5") { BackColor = Color.FromArgb(247, 248, 250), Padding = new Padding(10), ImageKey = "app", Name = "appDetailTab" };
+        appDetailList.Dock = DockStyle.Fill;
+        appDetailList.View = View.Details;
+        appDetailList.FullRowSelect = true;
+        appDetailList.GridLines = true;
+        appDetailList.VirtualMode = true;
+        appDetailList.OwnerDraw = true;
+        appDetailList.HideSelection = false;
+        appIconList.Images.Add("__default", SystemIcons.Application.ToBitmap());
+        appDetailList.SmallImageList = appIconList;
+        appDetailList.Columns.Add("\u5e94\u7528", 220);
+        appDetailList.Columns.Add("\u603b\u6b21\u6570", 100, HorizontalAlignment.Right);
+        appDetailList.Columns.Add("\u6309\u952e\u79cd\u7c7b", 100, HorizontalAlignment.Right);
+        appDetailList.Columns.Add("\u7edf\u8ba1\u6761", 260);
+        appDetailList.Columns.Add("\u5e38\u7528\u6309\u952e", 1600);
+        appDetailList.RetrieveVirtualItem += (_, e) =>
+        {
+            if (e.ItemIndex < 0 || e.ItemIndex >= appKeyRows.Count)
+            {
+                e.Item = new ListViewItem("");
+                return;
+            }
+            var row = appKeyRows[e.ItemIndex];
+            var item = new ListViewItem(row.App) { ImageKey = row.IconKey };
+            item.SubItems.Add(row.Count.ToString());
+            item.SubItems.Add(row.KeyTypes.ToString());
+            item.SubItems.Add("");
+            item.SubItems.Add(row.Summary);
+            e.Item = item;
+        };
+        appDetailList.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        appDetailList.DrawSubItem += (_, e) =>
+        {
+            if (e.ItemIndex < 0 || e.ItemIndex >= appKeyRows.Count) { e.DrawDefault = true; return; }
+            if (e.ColumnIndex == 0) DrawAppNameCell(e.Graphics, e.Bounds, appKeyRows[e.ItemIndex], e.Item?.Selected == true);
+            else if (e.ColumnIndex == 3) DrawStatBar(e.Graphics, e.Bounds, appKeyRows[e.ItemIndex].Count, appTotalCount);
+            else e.DrawDefault = true;
+        };
+        appTab.Controls.Add(appDetailList);
+
+        tabs.TabPages.AddRange([overviewTab, keyboardTab, mouseTab, peakTab, speedTab, rankTab, groupTab, appTab]);
         return tabs;
     }
 
@@ -385,6 +462,11 @@ internal sealed class MainForm : Form
             {
                 rankDirty = true;
                 RefreshRankList();
+            }
+            if (tabs.SelectedTab?.Name == "appDetailTab")
+            {
+                appDetailDirty = true;
+                RefreshAppDetailList();
             }
             if (tabs.SelectedTab?.Text == "分组") RefreshGroupStats();
         };
@@ -457,7 +539,7 @@ internal sealed class MainForm : Form
         };
         InputHooks.MousePressed += button =>
         {
-            if (trackModeBox.SelectedItem?.ToString() == "只统计键盘") return;
+            if (IsKeyboardOnlyMode()) return;
             if (IsDisposed) return;
             if (InvokeRequired)
             {
@@ -510,9 +592,36 @@ internal sealed class MainForm : Form
             pressedDirty = true;
     }
 
+    private bool IsKeyboardOnlyMode() => trackModeBox.SelectedIndex == 1;
+    private bool IsMouseOnlyMode() => trackModeBox.SelectedIndex == 2;
+
+    private void PollMouseDistance()
+    {
+        if (!isTracking || IsKeyboardOnlyMode())
+        {
+            lastMousePoint = null;
+            return;
+        }
+
+        var point = Cursor.Position;
+        if (lastMousePoint is { } last)
+        {
+            var dx = point.X - last.X;
+            var dy = point.Y - last.Y;
+            var distance = Math.Sqrt(dx * dx + dy * dy);
+            if (distance > 0 && distance < 5000)
+            {
+                EnsureTodayForInput();
+                state.MouseDistancePixels += distance;
+                liveDirty = true;
+            }
+        }
+        lastMousePoint = point;
+    }
+
     private void CountKeyInput(string name)
     {
-        if (trackModeBox.SelectedItem?.ToString() == "只统计鼠标") return;
+        if (IsMouseOnlyMode()) return;
         if (IsDisposed) return;
         if (InvokeRequired)
         {
@@ -539,6 +648,7 @@ internal sealed class MainForm : Form
             EnsureHourlyArrays();
             EnsureMinuteArrays();
             AddCount(state.Keys, name);
+            AddAppKeyCount(name);
             keyTotalCache++;
             var nowLocal = DateTime.Now;
             recentKeyTimestamps.Enqueue(DateTime.UtcNow);
@@ -548,6 +658,24 @@ internal sealed class MainForm : Form
             TrackRapidAndCombo(name);
             UpdateOverlay(name, state.Keys.TryGetValue(name, out var count) ? count : 0);
         });
+    }
+
+    private void AddAppKeyCount(string keyName)
+    {
+        state.AppKeys ??= new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+        state.AppPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var app = ForegroundApp.GetExternalAppInfo();
+        if (app == null || string.IsNullOrWhiteSpace(app.Value.Name)) return;
+        var appName = app.Value.Name;
+        if (!state.AppKeys.TryGetValue(appName, out var keys))
+        {
+            keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            state.AppKeys[appName] = keys;
+        }
+        if (!string.IsNullOrWhiteSpace(app.Value.ExecutablePath))
+            state.AppPaths[appName] = app.Value.ExecutablePath;
+        AddCount(keys, keyName);
+        appDetailDirty = true;
     }
 
     private void CountInput(Action action)
@@ -561,6 +689,7 @@ internal sealed class MainForm : Form
 
         action();
         rankDirty = true;
+        if (tabs.SelectedTab?.Name == "appDetailTab") appDetailDirty = true;
         liveDirty = true;
         // 排行页由 100ms 定时器批量刷新，避免多键同时按下时连续重建/重排。
         if (tabs.SelectedTab?.Text == "分组") RefreshGroupStats();
@@ -690,7 +819,9 @@ internal sealed class MainForm : Form
     private void StartTracking()
     {
         ChangeDate(DateOnly.FromDateTime(DateTime.Today));
+        lastMousePoint = null;
         InputHooks.Start();
+        mouseDistanceTimer.Start();
         isTracking = true;
         RefreshAll();
     }
@@ -698,6 +829,8 @@ internal sealed class MainForm : Form
     private void StopTracking()
     {
         InputHooks.Stop();
+        mouseDistanceTimer.Stop();
+        lastMousePoint = null;
         isTracking = false;
         SaveState();
         RefreshAll();
@@ -708,6 +841,7 @@ internal sealed class MainForm : Form
         SaveState();
         selectedDate = date;
         state = LoadState(selectedDate);
+        lastMousePoint = null;
         RecalculateTotals();
         if (DateOnly.FromDateTime(datePicker.Value) != selectedDate)
             datePicker.Value = selectedDate.ToDateTime(TimeOnly.MinValue);
@@ -730,13 +864,16 @@ internal sealed class MainForm : Form
         RecalculateTotals();
         datePicker.Value = selectedDate.ToDateTime(TimeOnly.MinValue);
         rankDirty = true;
+        appDetailDirty = true;
     }
 
     private void RefreshAll()
     {
         displayState = BuildDisplayState();
+        appDetailDirty = true;
         RefreshLive();
         RefreshRankList();
+        RefreshAppDetailList();
     }
 
     private void RefreshLive()
@@ -744,16 +881,56 @@ internal sealed class MainForm : Form
         if (isResizing) return;
         startButton.Text = isTracking ? "暂停" : "开始";
         nextButton.Enabled = selectedDate < DateOnly.FromDateTime(DateTime.Today);
-        stateLabel.Text = $"状态: {(isTracking ? "记录中" : "已暂停")} | 日期: {selectedDate:yyyy-MM-dd}";
+        stateLabel.Text = $"{AppVersion} | 状态: {(isTracking ? "记录中" : "已暂停")} | 日期: {selectedDate:yyyy-MM-dd}";
         totalLabel.Text = $"今日 键盘 {keyTotalCache} 次 | 鼠标 {mouseTotalCache} 次 | 显示范围 {rangeBox.SelectedItem ?? "今天"}";
+        totalLabel.Text += $" | \u9f20\u6807\u79fb\u52a8 {FormatDistance(state.MouseDistancePixels)}";
         pathLabel.Text = CurrentDataFile;
-        if (combinedView.Visible) combinedView.Invalidate();
-        if (keyboardView.Visible) keyboardView.Invalidate();
-        if (mouseView.Visible) mouseView.Invalidate();
-        if (peakView.Visible) peakView.Invalidate();
-        if (speedView.Visible) speedView.Invalidate();
+        InvalidateActiveView();
         if (overlayButton.Checked) overlay.UpdateSpeed(BuildSpeedStats(state));
     }
+
+    private void InvalidateActiveView()
+    {
+        var selected = tabs.SelectedTab?.Controls.Cast<Control>().FirstOrDefault();
+        if (selected is ListView) return;
+        selected?.Invalidate();
+    }
+
+    private void DrawAppNameCell(Graphics g, Rectangle bounds, AppKeyRow row, bool selected)
+    {
+        var bgColor = selected ? Color.FromArgb(219, 235, 255) : appDetailList.BackColor;
+        using var bg = new SolidBrush(bgColor);
+        g.FillRectangle(bg, bounds);
+
+        var iconKey = appIconList.Images.ContainsKey(row.IconKey) ? row.IconKey : "__default";
+        var image = appIconList.Images[iconKey] ?? appIconList.Images["__default"];
+        var iconSize = Math.Min(20, Math.Max(16, bounds.Height - 6));
+        var iconRect = new Rectangle(bounds.X + 6, bounds.Y + (bounds.Height - iconSize) / 2, iconSize, iconSize);
+        if (image != null) g.DrawImage(image, iconRect);
+
+        var textRect = new Rectangle(iconRect.Right + 8, bounds.Y, Math.Max(0, bounds.Width - iconSize - 18), bounds.Height);
+        TextRenderer.DrawText(g, row.App, appDetailList.Font, textRect, appDetailList.ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawStatBar(Graphics g, Rectangle bounds, int value, int max)
+    {
+        var outer = Rectangle.Inflate(bounds, -8, -7);
+        if (outer.Width <= 8 || outer.Height <= 6) return;
+
+        using var back = new SolidBrush(Color.FromArgb(236, 240, 245));
+        using var fill = new SolidBrush(Color.FromArgb(55, 132, 245));
+        using var border = new Pen(Color.FromArgb(197, 208, 222));
+        g.FillRectangle(back, outer);
+        g.DrawRectangle(border, outer);
+
+        var ratio = max <= 0 ? 0 : Math.Clamp(value / (double)max, 0, 1);
+        var fillRect = new Rectangle(outer.X + 1, outer.Y + 1, Math.Max(0, (int)Math.Round((outer.Width - 2) * ratio)), outer.Height - 2);
+        g.FillRectangle(fill, fillRect);
+
+        var text = max <= 0 ? "" : $"{ratio:P1}";
+        TextRenderer.DrawText(g, text, SystemFonts.MessageBoxFont, outer, Color.FromArgb(28, 43, 58), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
     private void RefreshRankList()
     {
         // 排行页只在用户真正切到“排行”时刷新，避免每次按键都重建 ListView 导致卡顿。
@@ -770,12 +947,93 @@ internal sealed class MainForm : Form
             .Take(200)
             .Select((x, index) => x with { Rank = index + 1 })
             .ToList();
+        rankTotalCount = Math.Max(1, rankRows.Sum(x => x.Count));
 
         rankList.BeginUpdate();
         if (rankList.VirtualListSize != rankRows.Count)
             rankList.VirtualListSize = rankRows.Count;
         rankList.Invalidate();
         rankList.EndUpdate();
+    }
+
+    private void RefreshAppDetailList()
+    {
+        if (tabs.SelectedTab?.Name != "appDetailTab") return;
+        if (!appDetailDirty) return;
+
+        appDetailDirty = false;
+        appKeyRows = BuildAppSummaryRows(displayState)
+            .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.App)
+            .ThenBy(x => x.Summary)
+            .Take(300)
+            .ToList();
+        appTotalCount = Math.Max(1, appKeyRows.Sum(x => x.Count));
+        EnsureAppIcons(appKeyRows);
+
+        appDetailList.BeginUpdate();
+        if (appDetailList.VirtualListSize != appKeyRows.Count)
+            appDetailList.VirtualListSize = appKeyRows.Count;
+        appDetailList.Invalidate();
+        appDetailList.EndUpdate();
+    }
+
+    private bool IsSelfApp(string appName) =>
+        NormalizeAppName(appName).StartsWith(selfProcessName, StringComparison.OrdinalIgnoreCase);
+
+    private IEnumerable<AppKeyRow> BuildAppSummaryRows(UsageState source)
+    {
+        return (source.AppKeys ?? new Dictionary<string, Dictionary<string, int>>())
+            .Where(app => !IsSelfApp(app.Key))
+            .GroupBy(app => NormalizeAppName(app.Key), StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var merged = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var app in group)
+                    MergeCounts(merged, app.Value);
+                var top = merged
+                    .Where(x => x.Value > 0)
+                    .OrderByDescending(x => x.Value)
+                    .ThenBy(x => x.Key)
+                    .Take(50)
+                    .Select(x => $"{x.Key} {x.Value}")
+                    .ToArray();
+                var iconPath = group
+                    .Select(x => TryGetAppPath(source, x.Key))
+                    .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+                iconPath ??= AppIconProvider.FindRunningProcessPath(group.Key);
+                return new AppKeyRow(group.Key, string.Join(", ", top), merged.Values.Sum(), merged.Count(x => x.Value > 0), AppIconProvider.IconKey(group.Key, iconPath), iconPath);
+            })
+            .Where(x => x.Count > 0);
+    }
+
+    private static string? TryGetAppPath(UsageState source, string appName)
+    {
+        if (source.AppPaths != null && source.AppPaths.TryGetValue(appName, out var path) && File.Exists(path)) return path;
+        var normalized = NormalizeAppName(appName);
+        return source.AppPaths?
+            .Where(x => string.Equals(NormalizeAppName(x.Key), normalized, StringComparison.OrdinalIgnoreCase) && File.Exists(x.Value))
+            .Select(x => x.Value)
+            .FirstOrDefault();
+    }
+
+    private void EnsureAppIcons(IEnumerable<AppKeyRow> rows)
+    {
+        foreach (var row in rows)
+        {
+            if (appIconList.Images.ContainsKey(row.IconKey)) continue;
+            appIconList.Images.Add(row.IconKey, AppIconProvider.GetIconBitmap(row.IconPath));
+        }
+    }
+
+    private static string NormalizeAppName(string appName)
+    {
+        if (string.IsNullOrWhiteSpace(appName)) return "Unknown";
+        var trimmed = appName.Trim();
+        var dash = trimmed.IndexOf(" - ", StringComparison.Ordinal);
+        if (dash > 0) trimmed = trimmed[..dash].Trim();
+        if (trimmed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) trimmed = trimmed[..^4];
+        return string.IsNullOrWhiteSpace(trimmed) ? "Unknown" : trimmed;
     }
 
     private void ResetCurrentDay()
@@ -786,6 +1044,7 @@ internal sealed class MainForm : Form
         RecalculateTotals();
         SaveState();
         rankDirty = true;
+        appDetailDirty = true;
         RefreshAll();
     }
 
@@ -797,6 +1056,13 @@ internal sealed class MainForm : Form
         writer.WriteLine("Date,Device,Button,Count");
         foreach (var entry in state.Keys.OrderByDescending(x => x.Value)) writer.WriteLine($"{selectedDate:yyyy-MM-dd},Keyboard,\"{EscapeCsv(entry.Key)}\",{entry.Value}");
         foreach (var entry in state.Mouse.OrderByDescending(x => x.Value)) writer.WriteLine($"{selectedDate:yyyy-MM-dd},Mouse,\"{EscapeCsv(entry.Key)}\",{entry.Value}");
+        writer.WriteLine();
+        writer.WriteLine("Date,App,TotalCount,KeyTypes,TopKeys");
+        foreach (var app in BuildAppSummaryRows(state).OrderByDescending(x => x.Count).ThenBy(x => x.App))
+            writer.WriteLine($"{selectedDate:yyyy-MM-dd},\"{EscapeCsv(app.App)}\",{app.Count},{app.KeyTypes},\"{EscapeCsv(app.Summary)}\"");
+        writer.WriteLine();
+        writer.WriteLine("Date,Metric,Value");
+        writer.WriteLine($"{selectedDate:yyyy-MM-dd},MouseDistancePixels,{state.MouseDistancePixels:F0}");
         MessageBox.Show($"已导出到：\n{csvPath}", "导出完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -844,6 +1110,9 @@ internal sealed class MainForm : Form
             MergeCounts(total.Mouse, one.Mouse);
             MergeCounts(total.Combos, one.Combos);
             MergeCounts(total.RapidKeys, one.RapidKeys);
+            MergeAppKeys(total.AppKeys, one.AppKeys);
+            MergeAppPaths(total.AppPaths, one.AppPaths);
+            total.MouseDistancePixels += one.MouseDistancePixels;
             var hk = NormalizeHourly(one.HourlyKeys);
             var hm = NormalizeHourly(one.HourlyMouse);
             var mk = NormalizeMinute(one.MinuteKeys);
@@ -863,6 +1132,30 @@ internal sealed class MainForm : Form
         if (source == null) return;
         foreach (var pair in source)
             target[pair.Key] = target.TryGetValue(pair.Key, out var old) ? old + pair.Value : pair.Value;
+    }
+
+    private static void MergeAppKeys(Dictionary<string, Dictionary<string, int>> target, Dictionary<string, Dictionary<string, int>>? source)
+    {
+        if (source == null) return;
+        foreach (var app in source)
+        {
+            if (!target.TryGetValue(app.Key, out var keys))
+            {
+                keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                target[app.Key] = keys;
+            }
+            MergeCounts(keys, app.Value);
+        }
+    }
+
+    private static void MergeAppPaths(Dictionary<string, string> target, Dictionary<string, string>? source)
+    {
+        if (source == null) return;
+        foreach (var pair in source)
+        {
+            if (!target.ContainsKey(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+                target[pair.Key] = pair.Value;
+        }
     }
 
     private readonly Dictionary<string, DateTime> lastTapAt = new(StringComparer.OrdinalIgnoreCase);
@@ -894,11 +1187,15 @@ internal sealed class MainForm : Form
         if (list == null) return;
         list.BeginUpdate();
         list.Items.Clear();
-        foreach (var row in BuildGroupRows(displayState))
+        var rows = BuildGroupRows(displayState).ToList();
+        var total = Math.Max(1, rows.Sum(x => x.Count));
+        foreach (var row in rows)
         {
             var item = new ListViewItem(row.Group);
             item.SubItems.Add(row.Count.ToString());
+            item.SubItems.Add("");
             item.SubItems.Add(row.Note);
+            item.Tag = new GroupBarTag(row.Count, total);
             list.Items.Add(item);
         }
         list.EndUpdate();
@@ -918,12 +1215,17 @@ internal sealed class MainForm : Form
             .Take(100)
             .Select((x, i) => x with { Rank = i + 1 })
             .ToList();
+        var appRows = BuildAppSummaryRows(displayState)
+            .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.App)
+            .Take(200)
+            .ToList();
 
         var sb = new StringBuilder();
         sb.AppendLine("<!doctype html><meta charset='utf-8'><title>KeyMouse Heatmap Report</title>");
         sb.AppendLine("<style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;background:#f6f8fb;color:#1f2937;padding:28px}.card{background:white;border-radius:14px;padding:18px;margin:16px 0;box-shadow:0 4px 18px #0001}table{border-collapse:collapse;background:white;width:100%}td,th{border:1px solid #d8dee8;padding:8px 12px;text-align:left}th{background:#eef3f8}.num{text-align:right}</style>");
         sb.AppendLine($"<h1>KeyMouse Heatmap 报告</h1><p>范围：{Html(rangeBox.SelectedItem?.ToString() ?? "今天")}　导出时间：{DateTime.Now:yyyy-MM-dd HH:mm:ss}</p>");
-        sb.AppendLine($"<div class='card'><h2>总览</h2><p>键盘：{displayState.Keys.Values.Sum()} 次；鼠标：{displayState.Mouse.Values.Sum()} 次；组合键：{displayState.Combos?.Values.Sum() ?? 0} 次；连击：{displayState.RapidKeys?.Values.Sum() ?? 0} 次。</p></div>");
+        sb.AppendLine($"<div class='card'><h2>总览</h2><p>键盘：{displayState.Keys.Values.Sum()} 次；鼠标：{displayState.Mouse.Values.Sum()} 次；鼠标移动：{FormatDistance(displayState.MouseDistancePixels)}；组合键：{displayState.Combos?.Values.Sum() ?? 0} 次；连击：{displayState.RapidKeys?.Values.Sum() ?? 0} 次。</p></div>");
         sb.AppendLine("<div class='card'><h2>分组统计</h2><table><tr><th>分组</th><th class='num'>次数</th><th>说明</th></tr>");
         foreach (var row in BuildGroupRows(displayState))
             sb.AppendLine($"<tr><td>{Html(row.Group)}</td><td class='num'>{row.Count}</td><td>{Html(row.Note)}</td></tr>");
@@ -931,6 +1233,10 @@ internal sealed class MainForm : Form
         sb.AppendLine("<div class='card'><h2>排行 Top 100</h2><table><tr><th>排行</th><th>设备</th><th>按键</th><th class='num'>次数</th></tr>");
         foreach (var row in rows)
             sb.AppendLine($"<tr><td>{row.Rank}</td><td>{Html(row.Device)}</td><td>{Html(row.Name)}</td><td class='num'>{row.Count}</td></tr>");
+        sb.AppendLine("</table></div>");
+        sb.AppendLine("<div class='card'><h2>\u5e94\u7528\u6309\u952e Top 200</h2><table><tr><th>\u5e94\u7528</th><th class='num'>\u603b\u6b21\u6570</th><th class='num'>\u6309\u952e\u79cd\u7c7b</th><th>\u5e38\u7528\u6309\u952e</th></tr>");
+        foreach (var row in appRows)
+            sb.AppendLine($"<tr><td>{Html(row.App)}</td><td class='num'>{row.Count}</td><td class='num'>{row.KeyTypes}</td><td>{Html(row.Summary)}</td></tr>");
         sb.AppendLine("</table></div>");
 
         File.WriteAllText(htmlPath, sb.ToString(), Encoding.UTF8);
@@ -1053,6 +1359,8 @@ internal sealed class MainForm : Form
                     loaded.Mouse ??= new Dictionary<string, int>();
                     loaded.Combos ??= new Dictionary<string, int>();
                     loaded.RapidKeys ??= new Dictionary<string, int>();
+                    loaded.AppKeys ??= new Dictionary<string, Dictionary<string, int>>();
+                    loaded.AppPaths ??= new Dictionary<string, string>();
                     loaded.HourlyKeys = NormalizeHourly(loaded.HourlyKeys);
                     loaded.HourlyMouse = NormalizeHourly(loaded.HourlyMouse);
                     loaded.MinuteKeys = NormalizeMinute(loaded.MinuteKeys);
@@ -1115,6 +1423,24 @@ internal sealed class MainForm : Form
         if (!File.Exists(todayFile)) File.Copy(oldFile, todayFile);
     }
 
+    private void MigrateVersionData()
+    {
+        try
+        {
+            var oldDir = Path.Combine(AppContext.BaseDirectory, "data");
+            if (!Directory.Exists(oldDir)) return;
+            if (string.Equals(Path.GetFullPath(oldDir).TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(appDir).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) return;
+
+            Directory.CreateDirectory(appDir);
+            foreach (var file in Directory.GetFiles(oldDir, "*.json"))
+            {
+                var dest = Path.Combine(appDir, Path.GetFileName(file));
+                if (!File.Exists(dest)) File.Copy(file, dest);
+            }
+        }
+        catch { }
+    }
+
     private static bool IsStartupEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false);
@@ -1138,10 +1464,20 @@ internal sealed class MainForm : Form
         HourlyMouse = new int[24],
         MinuteKeys = new int[1440],
         Combos = new Dictionary<string, int>(),
-        RapidKeys = new Dictionary<string, int>()
+        RapidKeys = new Dictionary<string, int>(),
+        AppKeys = new Dictionary<string, Dictionary<string, int>>(),
+        AppPaths = new Dictionary<string, string>(),
+        MouseDistancePixels = 0
     };
 
     private static void AddCount(Dictionary<string, int> table, string name) => table[name] = table.TryGetValue(name, out var count) ? count + 1 : 1;
+    internal static string FormatDistance(double pixels)
+    {
+        const double metersPerPixelAt96Dpi = 0.0254 / 96.0;
+        var meters = Math.Max(0, pixels) * metersPerPixelAt96Dpi;
+        if (meters < 1000) return $"{meters:F1} m";
+        return $"{meters / 1000.0:F2} km";
+    }
     private static string EscapeCsv(string value) => value.Replace("\"", "\"\"");
 }
 
@@ -1192,7 +1528,7 @@ internal sealed class CombinedView : ScrollableControl
         // 继续优化总览页：键盘略收一点，鼠标更宽一点，两个区域尽量刚好铺满。
         if (availableW >= 1180)
         {
-            var mouseW = Math.Clamp((int)(availableW * 0.235), 340, 460);
+            var mouseW = Math.Clamp((int)(availableW * 0.30), 430, 620);
             var keyboardW = availableW - mouseW - Gap;
             var rowH = Math.Min(availableH - 6, Math.Max(390, (int)Math.Round(keyboardW * 0.335)));
             return (
@@ -1202,7 +1538,7 @@ internal sealed class CombinedView : ScrollableControl
 
         if (availableW >= 930)
         {
-            var mouseW = Math.Clamp((int)(availableW * 0.27), 280, 360);
+            var mouseW = Math.Clamp((int)(availableW * 0.34), 360, 500);
             var keyboardW = availableW - mouseW - Gap;
             var rowH = Math.Min(availableH - 6, Math.Max(350, (int)Math.Round(keyboardW * 0.36)));
             return (
@@ -1381,6 +1717,44 @@ internal sealed class SpeedView : ScrollableControl
 
 internal readonly record struct SpeedStats(int CurrentMinute, int CurrentHour, int MaxMinute, int MaxHour, double ActiveAverageMinute, double AverageMinute, double AverageHour);
 internal readonly record struct RankRow(int Rank, string Device, string Name, int Count);
+internal readonly record struct AppKeyRow(string App, string Summary, int Count, int KeyTypes, string IconKey, string? IconPath);
+internal readonly record struct GroupBarTag(int Count, int Total);
+internal readonly record struct ForegroundAppInfo(string Name, string? ExecutablePath);
+
+internal sealed class StrongToolStripRenderer : ToolStripProfessionalRenderer
+{
+    protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+    {
+        if (e.Item is not ToolStripButton button)
+        {
+            base.OnRenderButtonBackground(e);
+            return;
+        }
+
+        var rect = new Rectangle(Point.Empty, e.Item.Size);
+        var selected = button.Checked || button.Selected || button.Pressed;
+        var fill = button.Checked
+            ? Color.FromArgb(217, 236, 255)
+            : button.Pressed
+                ? Color.FromArgb(195, 223, 255)
+                : button.Selected
+                    ? Color.FromArgb(235, 244, 255)
+                    : Color.Transparent;
+        if (selected)
+        {
+            using var brush = new SolidBrush(fill);
+            using var pen = new Pen(button.Checked ? Color.FromArgb(24, 119, 242) : Color.FromArgb(130, 180, 235), button.Checked ? 2f : 1f);
+            e.Graphics.FillRectangle(brush, rect);
+            e.Graphics.DrawRectangle(pen, 0, 0, rect.Width - 1, rect.Height - 1);
+        }
+
+        if (button.Checked)
+        {
+            using var accent = new SolidBrush(Color.FromArgb(24, 119, 242));
+            e.Graphics.FillRectangle(accent, 0, rect.Height - 3, rect.Width, 3);
+        }
+    }
+}
 
 internal sealed class OverlayForm : Form
 {
@@ -1788,11 +2162,11 @@ internal static class HeatmapRenderer
         RoundRect(g, bg, border, bounds, 8);
 
         // 标题、底部说明、按键尺寸都根据窗口实时缩放。
-        var header = title ? Math.Clamp((int)(bounds.Height * 0.105), 40, 68) : Math.Clamp((int)(bounds.Height * 0.035), 8, 18);
+        var header = title ? Math.Clamp((int)(bounds.Height * 0.145), 58, 86) : Math.Clamp((int)(bounds.Height * 0.045), 12, 24);
         if (title)
         {
-            var titleH = Math.Clamp((int)(bounds.Height * 0.07), 24, 40);
-            TextRenderer.DrawText(g, "键盘热力图", titleFont, new Rectangle(bounds.X + 14, bounds.Y + 10, bounds.Width - 28, titleH), TextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            var titleH = Math.Clamp((int)(bounds.Height * 0.075), 30, 46);
+            TextRenderer.DrawText(g, "键盘热力图", titleFont, new Rectangle(bounds.X + 14, bounds.Y + 14, bounds.Width - 28, titleH), TextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
 
         var max = Math.Max(1, state.Keys.Count == 0 ? 1 : state.Keys.Values.Max());
@@ -1812,7 +2186,7 @@ internal static class HeatmapRenderer
         var keyboardW = keySize * 25.2f;
         var keyboardH = keySize * 6.65f;
         var xOffset = innerX + Math.Max(0, (innerW - keyboardW) / 2f);
-        var yOffset = innerY + Math.Max(1, (innerH - keyboardH) * 0.10f);
+        var yOffset = innerY + Math.Max(title ? 8 : 2, (innerH - keyboardH) * 0.10f);
 
         foreach (var key in KeyboardLayout)
         {
@@ -1878,26 +2252,27 @@ internal static class HeatmapRenderer
         using var border = new Pen(BorderColor);
         using var strong = new Pen(Color.FromArgb(78, 91, 106), Math.Max(2, bounds.Width / 260));
         using var titleFont = new Font("Microsoft YaHei UI", Math.Max(14F, Math.Min(20F, bounds.Height * 0.036F)), FontStyle.Bold);
-        using var labelFont = new Font("Segoe UI", Math.Max(7F, Math.Min(13F, bounds.Height * 0.024F)), FontStyle.Bold);
-        using var countFont = new Font("Segoe UI", Math.Max(6.5F, Math.Min(12F, bounds.Height * 0.022F)));
+        using var labelFont = new Font("Segoe UI", Math.Max(6F, Math.Min(12F, bounds.Height * 0.022F)), FontStyle.Bold);
+        using var countFont = new Font("Segoe UI", Math.Max(5.8F, Math.Min(11F, bounds.Height * 0.020F)));
 
         RoundRect(g, bg, border, bounds, 8);
         // 标题下移并留更大高度，避免顶部黑体字被裁掉。
-        TextRenderer.DrawText(g, "鼠标热力图", titleFont, new Rectangle(bounds.X + 18, bounds.Y + 20, bounds.Width - 36, 44), TextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var titleRect = new Rectangle(bounds.X + 18, bounds.Y + 18, bounds.Width - 36, 50);
+        TextRenderer.DrawText(g, "鼠标热力图", titleFont, titleRect, TextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 
         var max = Math.Max(1, state.Mouse.Count == 0 ? 1 : state.Mouse.Values.Max());
         var pressedSet = new HashSet<string>(pressedButtons ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         using var liveFill = new SolidBrush(PressColor);
         using var livePen = new Pen(Color.FromArgb(0, 135, 170), Math.Max(3, bounds.Width / 180));
 
-        var contentTop = bounds.Y + 82;
-        var footerH = 34;
-        var contentBottom = bounds.Bottom - footerH - 8;
+        var contentTop = titleRect.Bottom + 18;
+        var footerH = Math.Clamp(bounds.Height / 7, 72, 96);
+        var contentBottom = bounds.Bottom - footerH - 18;
         var contentW = bounds.Width - 26;
-        var contentH = Math.Max(210, contentBottom - contentTop);
+        var contentH = Math.Max(110, contentBottom - contentTop);
 
         // 鼠标不再特别“瘦长”，改成更自然的宽高比；仍保证在总览页中更清楚。
-        var targetW = Math.Min((int)(contentW * 0.70), bounds.Width - 46);
+        var targetW = Math.Min((int)(contentW * 0.78), bounds.Width - 46);
         var targetH = (int)Math.Round(targetW * 1.42);
         if (targetH > contentH)
         {
@@ -1910,8 +2285,10 @@ internal static class HeatmapRenderer
             targetH = Math.Min(contentH, (int)Math.Round(targetW * 1.46));
         }
 
-        var mouseW = Math.Max(170, targetW);
-        var mouseH = Math.Max(240, targetH);
+        var minMouseW = Math.Min(170, Math.Max(120, contentW - 84));
+        var minMouseH = Math.Min(240, Math.Max(160, contentH));
+        var mouseW = Math.Max(minMouseW, targetW);
+        var mouseH = Math.Max(minMouseH, targetH);
         var sideWGuess = Math.Max(46, (int)(mouseW * 0.18));
         var totalVisualW = mouseW + sideWGuess + 18;
         var mouseX = bounds.X + (bounds.Width - totalVisualW) / 2 + sideWGuess + 10;
@@ -1964,7 +2341,8 @@ internal static class HeatmapRenderer
         DrawZone("Back Button", "Back", backRect);
 
         // 底部说明抬高并加高，避免左下角小字被裁掉。
-        TextRenderer.DrawText(g, "次数已直接显示在各个鼠标按键上。滚轮上滚/下滚会分开统计。", countFont, new Rectangle(bounds.X + 18, bounds.Bottom - footerH, bounds.Width - 36, footerH - 6), MutedColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.WordEllipsis);
+        var footerText = $"\u9f20\u6807\u79fb\u52a8\uff1a{MainForm.FormatDistance(state.MouseDistancePixels)}\r\n\u6b21\u6570\u5df2\u663e\u793a\u5728\u6309\u952e\u4e0a\uff0c\u6eda\u8f6e\u4e0a\u4e0b\u5206\u5f00\u7edf\u8ba1\u3002";
+        TextRenderer.DrawText(g, footerText, countFont, new Rectangle(bounds.X + 18, bounds.Bottom - footerH + 14, bounds.Width - 36, footerH - 24), MutedColor, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.WordEllipsis);
     }
 
     public static void DrawPeakChart(Graphics g, Rectangle bounds, UsageState state)
@@ -2238,6 +2616,9 @@ internal sealed class UsageState
     public int[] MinuteKeys { get; set; } = new int[1440];
     public Dictionary<string, int> Combos { get; set; } = new();
     public Dictionary<string, int> RapidKeys { get; set; } = new();
+    public Dictionary<string, Dictionary<string, int>> AppKeys { get; set; } = new();
+    public Dictionary<string, string> AppPaths { get; set; } = new();
+    public double MouseDistancePixels { get; set; }
 }
 
 internal sealed class AppSettings
@@ -2251,6 +2632,94 @@ internal sealed class AppSettings
     public string Range { get; set; } = "今天";
     public string Theme { get; set; } = "浅色";
     public bool MinimizeToBackground { get; set; } = true;
+}
+
+internal static class ForegroundApp
+{
+    private static ForegroundAppInfo? cachedInfo;
+    private static long cachedAt;
+
+    public static ForegroundAppInfo? GetExternalAppInfo()
+    {
+        var now = Environment.TickCount64;
+        if (now - cachedAt < 250) return cachedInfo;
+        cachedAt = now;
+
+        try
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return cachedInfo = null;
+            GetWindowThreadProcessId(hwnd, out var pid);
+            if (pid == 0 || pid == Environment.ProcessId) return cachedInfo = null;
+            using var process = Process.GetProcessById((int)pid);
+            if (string.IsNullOrWhiteSpace(process.ProcessName)) return cachedInfo = null;
+            string? path = null;
+            try { path = process.MainModule?.FileName; } catch { }
+            cachedInfo = new ForegroundAppInfo(process.ProcessName, path);
+            return cachedInfo;
+        }
+        catch
+        {
+            return cachedInfo = null;
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+
+internal static class AppIconProvider
+{
+    public static string IconKey(string appName, string? path) =>
+        !string.IsNullOrWhiteSpace(path) && File.Exists(path)
+            ? "path:" + path.ToLowerInvariant()
+            : "app:" + appName.ToLowerInvariant();
+
+    public static Bitmap GetIconBitmap(string? path)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            {
+                using var icon = Icon.ExtractAssociatedIcon(path);
+                if (icon != null) return icon.ToBitmap();
+            }
+        }
+        catch { }
+        return SystemIcons.Application.ToBitmap();
+    }
+
+    public static string? FindRunningProcessPath(string appName)
+    {
+        try
+        {
+            var normalized = NormalizeProcessName(appName);
+            foreach (var process in Process.GetProcessesByName(normalized))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        var path = process.MainModule?.FileName;
+                        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return path;
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static string NormalizeProcessName(string appName)
+    {
+        var name = appName.Trim();
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        return name;
+    }
 }
 
 internal static class KeyNames
@@ -2314,7 +2783,6 @@ internal static class InputHooks
     public static event Action<string>? KeyReleased;
     public static event Action<string>? MousePressed;
     public static event Action<string>? MouseReleased;
-
     private const int WhKeyboardLl = 13;
     private const int WhMouseLl = 14;
     private const int WmKeydown = 0x0100;
@@ -2459,4 +2927,3 @@ internal static class InputHooks
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
 }
-

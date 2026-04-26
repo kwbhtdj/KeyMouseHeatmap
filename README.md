@@ -1,205 +1,128 @@
 # KeyMouse Heatmap
 
-KeyMouse Heatmap 是一个 Windows 键盘 / 鼠标使用热力图工具，用来统计键盘按键、鼠标按键、滚轮、打字速度、峰值数据，并通过主窗口和悬浮窗实时显示输入反馈。
+KeyMouse Heatmap 是一个 Windows 键盘和鼠标使用热力图工具，用来统计按键、鼠标点击、滚轮、鼠标移动距离、输入速度、峰值时段、应用按键使用情况，并通过主窗口和悬浮窗实时显示。
 
-## 功能特点
+当前版本：v1.6.0
 
-### 键盘热力图
+## 主要功能
 
-- 支持真实 104 键键盘布局
-- 支持主键区、功能键区、编辑区、方向键、小数字键盘分区显示
-- 支持左右 Shift / Ctrl / Alt / Win 分开统计
-- 支持按键按下时实时高亮
-- 长按按键只统计一次
+- 键盘热力图：真实 104 键布局，支持左右 Shift / Ctrl / Alt / Win 分开统计。
+- 鼠标热力图：支持左键、右键、中键、侧键、滚轮上滚/下滚。
+- 鼠标移动距离：按屏幕像素估算并显示为 m / km。
+- 总览页：同时展示键盘和鼠标统计。
+- 排行页：按键次数排行，并显示占总量的统计条。
+- 分组页：字母区、数字区、功能键区、方向键区、小数字键盘、修饰键、鼠标等分组统计，并显示统计条。
+- 应用详情：按应用汇总按键使用，一应用一行，显示应用图标、总次数、按键种类、占比统计条、常用按键摘要。
+- 峰值页：按小时统计键盘和鼠标峰值。
+- 速度页：显示当前分钟、当前小时和平均输入速度。
+- 悬浮窗：可显示最近按键、按住状态和输入速度。
+- 导出：支持 CSV、PNG、HTML 报告。
+- 主题：支持浅色、深色、赛博蓝、极简。
 
-### 鼠标热力图
+## 数据位置
 
-- 支持左键、右键、中键
-- 支持侧键 Forward / Back
-- 支持滚轮上滚 Wheel Up / 下滚 Wheel Down 分开统计
-- 支持鼠标按键实时高亮
-- 鼠标按键次数直接显示在对应按键上
-
-### 总览页面
-
-- 键盘和鼠标可以在同一个页面同时查看
-- 支持窗口大小自适应
-- 小窗口下内容会自动缩放
-
-### 统计功能
-
-- 今日统计
-- 最近 7 天统计
-- 最近 30 天统计
-- 全部统计
-- 键盘 / 鼠标 / 全部统计模式切换
-- 排行页查看按键次数排名
-- 分组统计：字母区、数字区、功能键区、方向键、小数字键盘、修饰键、鼠标等
-
-### 速度统计
-
-- 本分钟输入次数
-- 当前小时输入次数
-- 平均打字速度
-- 长按不会重复计入速度
-
-### 峰值图
-
-- 按小时统计键盘和鼠标峰值
-- 横轴支持半小时刻度线
-- 刻度文字会根据窗口宽度自动精简
-
-### 悬浮窗
-
-- 支持显示最近按键
-- 支持显示正在按住的按键
-- 支持显示打字速度
-- 支持调节悬浮窗大小
-- 支持调节背景透明度，文字保持清晰不透明
-- 支持置顶显示
-
-### 其他功能
-
-- 最小化到后台
-- 托盘运行
-- 开机启动
-- 自动开始记录
-- 导出 CSV
-- 导出图片
-- 导出 HTML 报告
-- 主题切换
-
-## 运行环境
-
-- Windows 10 / Windows 11
-- .NET 9 Runtime 或 .NET 9 SDK
-
-如果只运行发布好的 exe，通常只需要 .NET Runtime。  
-如果需要自己编译，需要安装 .NET 9 SDK。
-
-查看本机 SDK：
-
-```powershell
-dotnet --list-sdks
-```
-
-如果能看到类似：
+从 v1.5.0 起，数据固定保存到：
 
 ```text
-9.0.xxx
+%LocalAppData%\KeyMouseHeatmap\data
 ```
 
-说明已经安装 .NET 9 SDK。
+这样不同版本、不同发布包会共用同一份数据，更新程序不会清空原来的统计。
 
-## 编译方法
+首次启动新版本时，程序会自动尝试把旧版本 exe 同目录下的 `data/*.json` 迁移到上面的固定目录。迁移是复制，不会删除旧数据。
 
-进入项目目录后运行：
+## 打包和运行方式
 
-```powershell
-dotnet restore
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false
-```
+项目提供多种发布方式，运行：
 
-也可以直接双击项目里的：
-
-```text
+```bat
 build_publish.cmd
 ```
 
-编译成功后，程序会生成在：
+会生成：
 
 ```text
-bin\Release\net9.0-windows\win-x64\publish\KeyMouseHeatmap.exe
+publish\framework-dependent-win-x64
+publish\self-contained-win-x64
+publish\singlefile-win-x64
+publish\self-contained-win-x86
 ```
 
-## 打包发布
-
-推荐只打包 `publish` 文件夹里的内容：
+推荐给普通用户使用：
 
 ```text
-bin\Release\net9.0-windows\win-x64\publish
+publish\singlefile-win-x64\KeyMouseHeatmap.exe
 ```
 
-不要把下面这些目录一起打包：
+这个版本是 self-contained，不需要用户安装 .NET 9。
+
+如果用户是 32 位 Windows，使用：
 
 ```text
-bin
-obj
-data
-.vs
-.git
+publish\self-contained-win-x86
 ```
 
-特别注意：`data` 文件夹里是统计数据。  
-如果你把 `data` 一起发出去，别人打开软件时会带着你的旧统计次数。
-
-## 数据存储位置
-
-程序会在 exe 同目录下创建：
+如果用户已经安装 .NET 9 Desktop Runtime，可以使用更小的：
 
 ```text
-data
+publish\framework-dependent-win-x64
 ```
 
-里面保存每日统计数据，例如：
+## 编译
 
-```text
-usage-2026-04-26.json
+需要 .NET 9 SDK：
+
+```powershell
+dotnet restore
+dotnet build
 ```
 
-如果想清空统计，可以在软件里点击“清空”，或者关闭软件后删除 `data` 文件夹。
+发布：
 
-## GitHub 上传注意事项
-
-### 1. 不要上传编译产物
-
-不要上传：
-
-```text
-bin/
-obj/
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
 ```
 
-这两个文件夹是编译生成文件，不属于源码。
+## 更新记录
 
-### 2. 不要上传个人统计数据
+### v1.6.0
 
-不要上传：
+- 应用详情第一列改为手绘应用图标和应用名，修复 OwnerDraw 下图标不显示的问题。
+- 新增程序版本号，状态栏左侧显示当前版本。
+- 项目文件写入 `Version`、`AssemblyVersion`、`FileVersion`。
+- README 重写为正常中文，并补充数据目录、打包方式和更新记录。
 
-```text
-data/
-```
+### v1.5.0
 
-里面可能包含你的键盘、鼠标使用统计。
+- 数据目录迁移到 `%LocalAppData%\KeyMouseHeatmap\data`，多个版本共用同一份统计数据。
+- 启动时自动迁移旧版本 exe 同目录下的 `data/*.json`。
+- 排行、应用详情、分组统计条改为占总量百分比，而不是相对最大项百分比。
+- 分组页新增统计条。
+- 前台应用识别增加 250ms 缓存，减少按键高频查询进程信息。
 
-### 3. 推荐使用 `.gitignore`
+### v1.4.0
 
-本项目已经附带 `.gitignore`，会自动忽略常见编译产物和统计数据。
+- 应用详情改为一应用一行，显示总次数、按键种类、常用按键摘要。
+- 应用详情常用按键列加宽，摘要扩展到 Top 50。
+- 排行页和应用详情新增统计条。
+- 列表页刷新节流，减少按键时 UI 重绘。
 
-### 4. 推荐仓库结构
+### v1.3.0
 
-```text
-KeyMouseHeatmap/
-├─ Program.cs
-├─ KeyMouseHeatmap.csproj
-├─ build_publish.cmd
-├─ README.md
-├─ LICENSE
-└─ .gitignore
-```
+- 鼠标移动距离显示为 m / km。
+- 鼠标移动距离统计改为定时读取 `Cursor.Position`，不再用全局 mouse move hook，改善鼠标移动丝滑度。
+- 鼠标热力图底部说明改为两行并预留空间，避免文字被遮挡。
 
-### 5. 发布 exe 的推荐方式
+### v1.2.0
 
-如果想让别人直接下载 exe，推荐使用 GitHub Releases：
+- 新增应用按键统计。
+- CSV 和 HTML 报告补充应用统计与鼠标移动距离。
+- 应用详情支持按任意日期和范围汇总。
 
-1. 打开 GitHub 仓库
-2. 进入 Releases
-3. 点击 Create a new release
-4. 填写版本号，例如 `v1.0.0`
-5. 把 `publish` 文件夹压缩成 zip 后上传
-6. 发布 Release
+### v1.1.0
 
-这样源码和可执行文件可以分开管理。
+- 调整总览布局，减少键盘热力图、鼠标热力图标题遮挡。
+- 优化鼠标热力图区尺寸。
 
 ## 隐私说明
 
@@ -209,58 +132,20 @@ KeyMouseHeatmap/
 - 鼠标按键名称
 - 次数
 - 时间分布
-- 打字速度统计
+- 应用进程名和可执行文件路径（用于应用详情图标和应用统计）
 
 本工具不记录：
 
-- 具体输入文字内容
+- 具体输入文本内容
 - 密码
 - 聊天内容
 - 网页内容
 - 剪贴板内容
 
-所有数据默认保存在本地 `data` 文件夹中。
+所有数据默认保存在本机 `%LocalAppData%\KeyMouseHeatmap\data`。
 
-## 杀毒软件误报说明
+## 注意
 
-本工具使用 Windows 全局键盘 / 鼠标 Hook 统计按键次数。  
-部分杀毒软件可能会对这类程序产生误报，这是输入统计工具常见情况。
+本工具使用 Windows 全局键盘 / 鼠标 Hook 统计输入事件。部分安全软件可能会提示风险，这是输入统计工具常见情况。
 
-本工具不记录具体输入文本，不联网，不上传数据。
-
-## 常见问题
-
-### 为什么长按只算一次？
-
-为了避免长按时 Windows 自动重复发送按键事件导致统计失真，程序会在按键松开前只统计一次。
-
-### 为什么有些特殊键显示为 VK？
-
-某些键盘厂商的自定义按键没有标准名称，Windows 只能提供虚拟键码，因此可能显示为 VK 开头的名称。
-
-### 为什么打包给别人后统计不是 0？
-
-大概率是把 `data` 文件夹一起打包了。  
-重新打包时不要包含 `data` 文件夹即可。
-
-### 为什么编译失败？
-
-先确认安装了 .NET 9 SDK：
-
-```powershell
-dotnet --list-sdks
-```
-
-然后在项目目录运行：
-
-```powershell
-dotnet restore
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false
-```
-
-如果仍然失败，把红色报错截图发给维护者。
-
-## 免责声明
-
-本工具仅用于个人输入统计和可视化分析。  
-请勿将其用于未经允许的监控、记录或侵犯他人隐私的场景。
+请不要将本工具用于未经允许的监控、记录或侵犯他人隐私的场景。
