@@ -7,9 +7,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>KeyMouseHeatmap</AssemblyName>
     <RootNamespace>KeyMouseHeatmap</RootNamespace>
-    <Version>1.8.1</Version>
-    <AssemblyVersion>1.8.1.0</AssemblyVersion>
-    <FileVersion>1.8.1.0</FileVersion>
+    <Version>1.7.6</Version>
+    <AssemblyVersion>1.7.6.0</AssemblyVersion>
+    <FileVersion>1.7.6.0</FileVersion>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
@@ -18,20 +18,4 @@
     <EnableCompressionInSingleFile Condition="'$(SelfContained)' != 'true'">false</EnableCompressionInSingleFile>
     <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
   </PropertyGroup>
-  <ItemGroup>
-    <Compile Remove="bin\**\*.cs" />
-    <Compile Remove="obj\**\*.cs" />
-    <Compile Remove="publish\**\*.cs" />
-    <Compile Remove="publish-*\**\*.cs" />
-    <Compile Remove="release\**\*.cs" />
-    <Compile Remove="release-*\**\*.cs" />
-    <Compile Remove="build-check\**\*.cs" />
-    <None Remove="bin\**" />
-    <None Remove="obj\**" />
-    <None Remove="publish\**" />
-    <None Remove="publish-*\**" />
-    <None Remove="release\**" />
-    <None Remove="release-*\**" />
-    <None Remove="build-check\**" />
-  </ItemGroup>
 </Project>

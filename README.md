@@ -2,7 +2,7 @@
 
 KeyMouse Heatmap 是一个 Windows 键盘和鼠标使用热力图工具，用来统计按键、鼠标点击、滚轮、鼠标移动距离、输入速度、峰值时段、应用按键使用情况，并通过主窗口和悬浮窗实时显示。
 
-当前版本：v1.6.2
+当前版本：v1.7.7
 
 ## 主要功能
 
@@ -12,7 +12,8 @@ KeyMouse Heatmap 是一个 Windows 键盘和鼠标使用热力图工具，用来
 - 总览页：同时展示键盘和鼠标统计。
 - 排行页：按键次数排行，并显示占总量的统计条。
 - 分组页：字母区、数字区、功能键区、方向键区、小数字键盘、修饰键、鼠标等分组统计，并显示统计条。
-- 应用详情：按应用汇总按键使用，一应用一行，显示应用图标、总次数、按键种类、占比统计条、常用按键摘要。
+- 应用详情：按应用汇总运行/使用时长和按键使用，一应用一行，显示应用图标、使用时长、总次数、按键种类、占比统计条、常用按键摘要。
+  使用时长按“正在运行的应用”统计，不再只统计前台窗口；应用在后台运行时也会累加时长。
 - 峰值页：按小时统计键盘和鼠标峰值。
 - 速度页：显示当前分钟、当前小时和平均输入速度。
 - 悬浮窗：可显示最近按键、按住状态和输入速度。
@@ -33,7 +34,7 @@ KeyMouse Heatmap 是一个 Windows 键盘和鼠标使用热力图工具，用来
 
 ## 打包和运行方式
 
-项目提供多种发布方式，运行：
+项目已经改成轻量化发布方式，默认只生成 2 个包，避免一次性生成 4 个版本导致 publish 文件夹过大。运行：
 
 ```bat
 build_publish.cmd
@@ -42,31 +43,25 @@ build_publish.cmd
 会生成：
 
 ```text
-publish\framework-dependent-win-x64
-publish\self-contained-win-x64
-publish\singlefile-win-x64
-publish\self-contained-win-x86
+publish\lite-win-x64
+publish\portable-compressed-win-x64
 ```
 
-推荐给普通用户使用：
+最轻量推荐：
 
 ```text
-publish\singlefile-win-x64\KeyMouseHeatmap.exe
+publish\lite-win-x64
 ```
 
-这个版本是 self-contained，不需要用户安装 .NET 9。
+这个版本体积最小，但电脑需要安装 .NET 9 Desktop Runtime。
 
-如果用户是 32 位 Windows，使用：
+如果不想让用户安装 .NET，使用：
 
 ```text
-publish\self-contained-win-x86
+publish\portable-compressed-win-x64\KeyMouseHeatmap.exe
 ```
 
-如果用户已经安装 .NET 9 Desktop Runtime，可以使用更小的：
-
-```text
-publish\framework-dependent-win-x64
-```
+这个版本是压缩后的 self-contained 单文件，比旧版生成的多个 self-contained 文件夹更省空间。
 
 ## 编译
 
@@ -80,10 +75,69 @@ dotnet build
 发布：
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:PublishReadyToRun=false -p:DebugType=none -p:DebugSymbols=false -p:EnableCompressionInSingleFile=true
 ```
 
 ## 更新记录
+
+### v1.7.1
+
+- 打包脚本改成轻量化模式：默认只生成 lite-win-x64 和 portable-compressed-win-x64 两个包，不再一次生成 4 个发布目录。
+- 新增发布体积优化参数：关闭 ReadyToRun、关闭调试符号、启用单文件压缩，减少 exe 和发布文件夹占用。
+- 数据 JSON 改成紧凑保存，不再带大量缩进和空格，后续保存会逐步降低数据目录占用。
+- 删除源码包里未使用的 Assets/app.png，只保留真正用于程序图标的 Assets/app.ico。
+
+### v1.7.0
+
+- 修复鼠标侧键 Raw Input 标志位：Back/Forward 不再错位，后退侧键可以正常记录和高亮。
+- 按下/松开高亮改为即时刷新，窗口化/小窗口下也尽量做到和全屏一样实时响应。
+- 优化热力图文字绘制，减少快速按键时的重绘开销，降低窗口化时的卡顿。
+
+### v1.6.8
+
+- 排行、分组、应用详情页改为虚拟列表 + 双缓冲刷新，统计数据可以实时更新，同时减少每次计数导致的闪烁。
+- 应用详情页使用时长恢复秒级显示，运行中的应用会按 1 秒递增。
+- 排行、分组、应用详情支持点击表头排序，再点同一个表头可在升序/降序之间切换。
+- 排行、分组、应用详情会随窗口宽度自动调整列宽，并支持按住 Ctrl 滚动鼠标滚轮缩放列表字号。
+
+### v1.6.7
+
+- 优化应用详情页刷新逻辑：使用时长仍然每秒精确统计，但列表不再每秒刷新，避免使用时长每涨 1 秒就导致界面闪烁。
+- 应用详情页的使用时长显示改为分钟级展示，例如“不足1分钟 / 3分钟 / 1小时05分”，不再在界面里连续跳秒。
+- 应用详情列表开启双缓冲，减少列表重绘时的闪屏。
+
+### v1.6.6
+
+- 优化方向键行为：按 ←/→/↑/↓ 不再触发 TabControl 自动切换到上一个/下一个页面。
+- 方向键仍然会被正常统计并实时高亮。
+
+### v1.6.5
+
+- 应用详情的“使用时长”改为统计正在运行的应用：前台窗口、后台运行的普通软件都会累加时长，不再只统计前台应用。
+- 同一个软件有多个进程时按应用名合并，每秒只累加一次，避免 Chrome、Edge 等多进程软件被重复累计。
+- 继续过滤常见系统进程和服务进程，减少应用详情里出现大量系统后台项。
+- 按键和鼠标高亮改成 Raw Input 消息到达时立即更新，不再等统计队列批量处理，降低按下后的显示延迟。
+- 实时刷新间隔从约 33ms 调整到 10ms，鼠标滚轮瞬时高亮缩短到 80ms，按下/松开反馈更贴近实时。
+- 增加 `GetAsyncKeyState` 状态校准：即使极快打字时偶发漏掉 KeyUp，也会主动校正已经松开的键，减少“上一个键还亮着”的情况。
+- Raw Input 键盘层不再自己过滤 KeyDown 重复，改由 UI 状态层判断是否为长按，避免内部状态卡住后影响后续快速按键。
+- 版本号更新为 v1.6.5。
+
+### v1.6.4
+
+- 应用详情新增“使用时长”列，记录每个前台应用在统计开启期间的使用时长。
+- 数据文件新增 `AppUsageSeconds` 字段，支持今天、最近 7 天、最近 30 天、全部范围汇总。
+- CSV 和 HTML 报告新增应用使用时长字段。
+- 键盘统计改用 Raw Input 接收后台键盘事件，不再使用低级键盘钩子，避免影响其他应用全局快捷键响应。
+- 版本号更新为 v1.6.4。
+
+### v1.6.3
+
+- 新增应用图标资源，exe、主窗口、任务栏和托盘统一使用 KeyMouse Heatmap 图标。
+- 按键事件改为线程安全队列批处理：键盘钩子线程只负责快速入队，避免快速按键时每个按键都立即切到 UI 线程。
+- 鼠标按钮和滚轮事件也进入同一输入队列，统一批量统计，减少按键和鼠标同时操作时的 UI 抢占。
+- 自动保存改为后台写 JSON，数据量变大时不再由 UI 线程直接序列化和写盘，降低周期性卡顿。
+- 保存使用临时文件覆盖，减少写入中断导致数据文件损坏的风险。
+- 版本号更新为 v1.6.3。
 
 ### v1.6.2
 
@@ -148,7 +202,7 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 - 鼠标按键名称
 - 次数
 - 时间分布
-- 应用进程名和可执行文件路径（用于应用详情图标和应用统计）
+- 应用进程名、可执行文件路径和运行/使用时长（用于应用详情图标、使用时长和应用统计）
 
 本工具不记录：
 
@@ -162,6 +216,6 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 
 ## 注意
 
-本工具使用 Windows 全局键盘 / 鼠标 Hook 统计输入事件。部分安全软件可能会提示风险，这是输入统计工具常见情况。
+本工具使用 Windows Raw Input 接收键盘和鼠标事件，不拦截、不改写、不阻止其他应用的输入和快捷键。部分安全软件仍可能对输入统计工具提示风险，这是同类工具常见情况。
 
 请不要将本工具用于未经允许的监控、记录或侵犯他人隐私的场景。
