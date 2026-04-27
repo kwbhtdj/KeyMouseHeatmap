@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Unicode;
+using System.Threading;
 
 namespace KeyMouseHeatmap;
 
@@ -103,6 +104,7 @@ internal sealed class MainForm : Form
     private bool overlayKeyDirty;
     private string overlayKeyName = string.Empty;
     private int overlayKeyCount;
+    private readonly ConcurrentDictionary<uint, byte> pendingAppPathResolves = new();
     private Point? lastMousePoint;
     private long lastDistanceUiTick;
     private DateTime? lastAppUsageTickUtc;
@@ -227,7 +229,7 @@ internal sealed class MainForm : Form
         mouseDistanceTimer.Tick += (_, _) => PollMouseDistance();
 
         appUsageTimer.Interval = 1000;
-        appUsageTimer.Tick += (_, _) => { if (!IsHeavyUiSuspended()) PollAppUsage(); };
+        appUsageTimer.Tick += (_, _) => { if (!IsHeavyUiSuspended()) PollAppUsageAsync(); };
 
         resizeTimer.Interval = 140;
         resizeTimer.Tick += (_, _) =>
@@ -911,6 +913,70 @@ internal sealed class MainForm : Form
         if (tabs.SelectedTab?.Name == "appDetailTab") liveDirty = true;
     }
 
+    private void PollAppUsageAsync()
+    {
+        if (!isTracking)
+        {
+            lastAppUsageTickUtc = null;
+            return;
+        }
+
+        var nowUtc = DateTime.UtcNow;
+        var elapsedSeconds = lastAppUsageTickUtc.HasValue ? (nowUtc - lastAppUsageTickUtc.Value).TotalSeconds : 0;
+        lastAppUsageTickUtc = nowUtc;
+
+        // 系统睡眠、卡顿或暂停后产生的大跨度不计入，避免一次性把离线时间算给某个程序。
+        if (elapsedSeconds <= 0 || elapsedSeconds > 10) return;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                var runningApps = RunningAppUsageSnapshot.GetRunningExternalApps()
+                    .Where(app => !string.IsNullOrWhiteSpace(app.Name))
+                    .GroupBy(app => NormalizeAppName(app.Name), StringComparer.OrdinalIgnoreCase)
+                    .Where(group => !IsSelfApp(group.Key))
+                    .Select(group => new
+                    {
+                        Name = group.Key,
+                        Path = group.Select(x => x.ExecutablePath).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x) && File.Exists(x))
+                    })
+                    .ToArray();
+
+                if (runningApps.Length == 0) return;
+
+                if (IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed) return;
+
+                    EnsureTodayForInput();
+                    state.AppUsageSeconds ??= new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                    state.AppPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var app in runningApps)
+                    {
+                        state.AppUsageSeconds[app.Name] = state.AppUsageSeconds.TryGetValue(app.Name, out var oldSeconds)
+                            ? oldSeconds + elapsedSeconds
+                            : elapsedSeconds;
+
+                        if (!string.IsNullOrWhiteSpace(app.Path))
+                            state.AppPaths[app.Name] = app.Path;
+                    }
+
+                    stateDirty = true;
+
+                    var uiSignature = string.Join("|", runningApps.Select(x => x.Name).OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                    lastAppUsageUiSignature = uiSignature;
+                    lastAppUsageUiRefreshUtc = nowUtc;
+                    appDetailDirty = true;
+                    if (tabs.SelectedTab?.Name == "appDetailTab") liveDirty = true;
+                }));
+            }
+            catch { }
+        });
+    }
+
     private void CountKeyInput(string name)
     {
         if (IsMouseOnlyMode()) return;
@@ -943,18 +1009,50 @@ internal sealed class MainForm : Form
     {
         state.AppKeys ??= new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         state.AppPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var app = ForegroundApp.GetExternalAppInfo();
-        if (app == null || string.IsNullOrWhiteSpace(app.Value.Name)) return;
-        var appName = NormalizeAppName(app.Value.Name);
+        if (!ForegroundApp.TryGetExternalForegroundProcess(out var pid, out var appProcessName)) return;
+        var appName = NormalizeAppName(appProcessName);
         if (!state.AppKeys.TryGetValue(appName, out var keys))
         {
             keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             state.AppKeys[appName] = keys;
         }
-        if (!string.IsNullOrWhiteSpace(app.Value.ExecutablePath))
-            state.AppPaths[appName] = app.Value.ExecutablePath;
         AddCount(keys, keyName);
         appDetailDirty = true;
+
+        if (!state.AppPaths.ContainsKey(appName))
+            ScheduleResolveAppPath(pid, appName);
+    }
+
+    private void ScheduleResolveAppPath(uint pid, string appName)
+    {
+        if (pid == 0 || string.IsNullOrWhiteSpace(appName)) return;
+        if (!pendingAppPathResolves.TryAdd(pid, 0)) return;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                var path = ForegroundApp.TryGetProcessPath(pid);
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+                if (IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed) return;
+                    state.AppPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (!state.AppPaths.ContainsKey(appName))
+                    {
+                        state.AppPaths[appName] = path;
+                        stateDirty = true;
+                        appDetailDirty = true;
+                    }
+                }));
+            }
+            catch { }
+            finally
+            {
+                pendingAppPathResolves.TryRemove(pid, out _);
+            }
+        });
     }
 
     private void CountInput(Action action)
@@ -3927,22 +4025,59 @@ internal static class ForegroundApp
         if (now - cachedAt < 250) return cachedInfo;
         cachedAt = now;
 
+        if (!TryGetExternalForegroundProcess(out var pid, out var name))
+            return cachedInfo = null;
+
+        var path = TryGetProcessPath(pid);
+        cachedInfo = new ForegroundAppInfo(name, path);
+        return cachedInfo;
+    }
+
+    public static bool TryGetExternalForegroundProcess(out uint pid, out string processName)
+    {
+        pid = 0;
+        processName = string.Empty;
+
         try
         {
             var hwnd = GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return cachedInfo = null;
-            GetWindowThreadProcessId(hwnd, out var pid);
-            if (pid == 0 || pid == Environment.ProcessId) return cachedInfo = null;
+            if (hwnd == IntPtr.Zero) return false;
+            GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0 || pid == Environment.ProcessId) return false;
             using var process = Process.GetProcessById((int)pid);
-            if (string.IsNullOrWhiteSpace(process.ProcessName)) return cachedInfo = null;
-            string? path = null;
-            try { path = process.MainModule?.FileName; } catch { }
-            cachedInfo = new ForegroundAppInfo(process.ProcessName, path);
-            return cachedInfo;
+            processName = process.ProcessName;
+            return !string.IsNullOrWhiteSpace(processName);
         }
         catch
         {
-            return cachedInfo = null;
+            pid = 0;
+            processName = string.Empty;
+            return false;
+        }
+    }
+
+    public static string? TryGetProcessPath(uint pid)
+    {
+        const uint processQueryLimitedInformation = 0x1000;
+        IntPtr handle = IntPtr.Zero;
+        try
+        {
+            handle = OpenProcess(processQueryLimitedInformation, false, pid);
+            if (handle == IntPtr.Zero) return null;
+
+            var capacity = 1024;
+            var sb = new StringBuilder(capacity);
+            var size = sb.Capacity;
+            if (!QueryFullProcessImageName(handle, 0, sb, ref size)) return null;
+            return size > 0 ? sb.ToString(0, size) : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (handle != IntPtr.Zero) CloseHandle(handle);
         }
     }
 
@@ -3951,6 +4086,16 @@ internal static class ForegroundApp
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(IntPtr hProcess, int flags, StringBuilder exeName, ref int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
 }
 
 internal static class AppIconProvider
